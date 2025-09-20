@@ -114,4 +114,8 @@ if video_url:
                     st.warning("⚠️ File not found after download.")
  
     except Exception as e:
-        st.error(f"❌ Error: {e}")
+        # Provide a more specific error message for the 403 error
+        if 'HTTP Error 403' in str(e):
+            st.error("❌ Error: YouTube is blocking requests from this server (HTTP 403). This is a common issue with apps hosted on cloud platforms. Please try again later or with a different video.")
+        else:
+            st.error(f"❌ An unexpected error occurred: {e}")
