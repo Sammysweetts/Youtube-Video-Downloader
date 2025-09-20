@@ -3,18 +3,25 @@
 import streamlit as st
 import yt_dlp
 import os
-import tempfile
-from pathlib import Path
 
-# ✅ Enhanced configuration to avoid 403 errors
+# ✅ Custom headers to avoid 403 Forbidden by simulating a browser
 CUSTOM_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-us,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate',
-    'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
-    'Keep-Alive': '115',
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/115.0.0.0 Safari/537.36 Edg/115.0.0.0'
+    ),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Referer': 'https://www.google.com',
+    'DNT': '1',
     'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'cross-site',
+    'Sec-Fetch-User': '?1',
+    'TE': 'trailers',
 }
 
 st.set_page_config(page_title="YouTube Downloader", page_icon="📹")
@@ -26,186 +33,110 @@ if video_url:
     try:
         st.info("🔍 Fetching available formats...")
 
-        # Enhanced extraction options
+        # --- Step 1: Get video info without downloading ---
         extract_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False,
-            'force_generic_extractor': False,
             'headers': CUSTOM_HEADERS,
-            # Additional options to help with 403 errors
-            'cookiefile': None,
-            'nocheckcertificate': True,
-            'prefer_insecure': True,
-            'user_agent': CUSTOM_HEADERS['User-Agent'],
-            # Use different extractors if needed
-            'allowed_extractors': ['youtube', 'youtube:tab', 'youtube:playlist'],
         }
 
         with yt_dlp.YoutubeDL(extract_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
 
-        # Get video title for display
-        video_title = info.get('title', 'Unknown Title')
-        st.success(f"📺 Found: {video_title}")
-
+        # --- Step 2: Filter for video-only formats and create UI choices ---
         video_formats = []
-        audio_formats = []
-
-        for format in info['formats']:
-            if format.get('vcodec') != 'none' and format.get('acodec') == 'none' and format.get('height') is not None:
-                video_formats.append(format)
-            elif format.get('acodec') != 'none' and format.get('vcodec') == 'none':
-                audio_formats.append(format)
-
-        # Sort video formats by quality
+        for f in info.get('formats', []):
+            # Filter for formats that have video but no audio
+            if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('height') is not None:
+                video_formats.append(f)
+        
+        # Sort by height (resolution) in descending order
         video_formats = sorted(video_formats, key=lambda x: x.get('height', 0), reverse=True)
 
-        if not video_formats:
-            st.error("No video formats available for this video.")
+        format_labels = []
+        format_map = {} # Maps a display label to the video height
+
+        # Use a set to keep track of resolutions we've already added
+        added_resolutions = set()
+
+        for f in video_formats:
+            height = f.get('height')
+            if height in added_resolutions:
+                continue # Skip if we already have this resolution
+
+            ext = f.get('ext')
+            size = f.get('filesize') or f.get('filesize_approx')
+            size_text = f"{round(size / 1024 / 1024, 2)} MB" if size else "Unknown size"
+            
+            label = f"{height}p ({ext}) - {size_text}"
+            format_labels.append(label)
+            format_map[label] = height # Map the user-friendly label to the resolution height
+            added_resolutions.add(height)
+
+        if not format_labels:
+            st.warning("No video-only formats found. This might be a live stream or a different kind of video.")
         else:
-            format_labels = []
-            format_map = {}
-
-            for f in video_formats:
-                height = f.get('height')
-                ext = f.get('ext')
-                size = f.get('filesize') or f.get('filesize_approx')
-                size_text = f"{round(size / 1024 / 1024, 2)} MB" if size else "Unknown size"
-                format_id = f.get('format_id')
-                fps = f.get('fps', 'Unknown')
-                label = f"{height}p | {fps}fps | {ext} | {size_text}"
-                format_labels.append(label)
-                format_map[label] = format_id
-
             selected_label = st.selectbox("🎞 Choose video quality:", format_labels)
 
-            # Add format selection for audio-only download
-            download_type = st.radio("📥 Download type:", ["Video + Audio", "Audio Only"])
+            if st.button("⬇️ Download Video"):
+                selected_height = format_map[selected_label]
+                
+                st.info(f"📥 Download starting for {selected_height}p...")
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
-            if st.button("⬇️ Download"):
-                try:
-                    # Create a temporary directory
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        if download_type == "Video + Audio":
-                            video_format_id = format_map[selected_label]
-                            
-                            # Find best audio format
-                            if audio_formats:
-                                audio_format_id = sorted(audio_formats, key=lambda x: x.get("abr", 0), reverse=True)[0]['format_id']
-                                format_string = f'{video_format_id}+{audio_format_id}/best[ext=mp4]/best'
-                            else:
-                                format_string = f'{video_format_id}/best'
-                            
-                            output_ext = 'mp4'
-                        else:
-                            # Audio only
-                            if audio_formats:
-                                audio_format_id = sorted(audio_formats, key=lambda x: x.get("abr", 0), reverse=True)[0]['format_id']
-                                format_string = f'{audio_format_id}/bestaudio'
-                            else:
-                                format_string = 'bestaudio'
-                            output_ext = 'mp3'
+                def progress_hook(d):
+                    if d['status'] == 'downloading':
+                        percentage = d.get('_percent_str', '0%').strip().replace('%', '')
+                        try:
+                            progress_bar.progress(float(percentage) / 100.0)
+                            status_text.text(f"Downloading... {d['_percent_str']} of {d['_total_bytes_str']} at {d['_speed_str']}")
+                        except (ValueError, TypeError):
+                            pass # Ignore if percentage is not a number
+                    elif d['status'] == 'finished':
+                        progress_bar.progress(1.0)
+                        status_text.text("Download finished, merging files...")
 
-                        # Safe filename
-                        safe_title = "".join(c for c in video_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
-                        output_filename = f"{safe_title}.{output_ext}"
-                        output_path = os.path.join(temp_dir, output_filename)
+                # --- Step 3: Download using a format selector, not a fixed ID ---
+                # This is the key change to fix the 403 error.
+                # It tells yt-dlp to find the best video of the selected height and the best audio,
+                # then merge them. This way, yt-dlp fetches fresh URLs at the time of download.
+                download_opts = {
+                    'format': f'bestvideo[height={selected_height}]+bestaudio/best',
+                    'outtmpl': f'/tmp/{info["title"]}.%(ext)s',
+                    'merge_output_format': 'mp4',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'headers': CUSTOM_HEADERS,
+                    'progress_hooks': [progress_hook],
+                }
 
-                        st.info("📥 Download in progress... This may take a few moments.")
+                filepath = None
+                with yt_dlp.YoutubeDL(download_opts) as ydl:
+                    # We run extract_info again, but this time with download=True
+                    # This gets us the final, correct filename after merging
+                    download_info = ydl.extract_info(video_url, download=True)
+                    filepath = ydl.prepare_filename(download_info)
 
-                        # Enhanced download options
-                        download_opts = {
-                            'format': format_string,
-                            'outtmpl': output_path,
-                            'quiet': True,
-                            'no_warnings': True,
-                            'headers': CUSTOM_HEADERS,
-                            'user_agent': CUSTOM_HEADERS['User-Agent'],
-                            'nocheckcertificate': True,
-                            'prefer_insecure': True,
-                            # Additional options for better compatibility
-                            'ignoreerrors': False,
-                            'no_color': True,
-                            'no_call_home': True,
-                            'no_check_certificate': True,
-                            # Post-processing options
-                            'postprocessors': [{
-                                'key': 'FFmpegVideoConvertor',
-                                'preferedformat': output_ext,
-                            }] if download_type == "Video + Audio" else [{
-                                'key': 'FFmpegExtractAudio',
-                                'preferredcodec': 'mp3',
-                                'preferredquality': '192',
-                            }],
-                            # Retry options
-                            'retries': 10,
-                            'fragment_retries': 10,
-                            'skip_unavailable_fragments': True,
-                        }
+                if filepath and os.path.exists(filepath):
+                    status_text.empty()
+                    progress_bar.empty()
+                    st.success(f"✅ Video downloaded: {os.path.basename(filepath)}")
 
-                        # Progress bar placeholder
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-
-                        def progress_hook(d):
-                            if d['status'] == 'downloading':
-                                percent = d.get('downloaded_bytes', 0) / d.get('total_bytes', 1)
-                                progress_bar.progress(min(percent, 1.0))
-                                status_text.text(f"Downloading: {percent*100:.1f}%")
-                            elif d['status'] == 'finished':
-                                progress_bar.progress(1.0)
-                                status_text.text("Processing...")
-
-                        download_opts['progress_hooks'] = [progress_hook]
-
-                        with yt_dlp.YoutubeDL(download_opts) as ydl:
-                            ydl.download([video_url])
-
-                        # Check if file was created
-                        if os.path.exists(output_path):
-                            st.success(f"✅ Download complete: {output_filename}")
-                            
-                            # Read file and provide download button
-                            with open(output_path, "rb") as f:
-                                file_data = f.read()
-                                
-                            st.download_button(
-                                label=f"📂 Click to Download {output_ext.upper()}",
-                                data=file_data,
-                                file_name=output_filename,
-                                mime=f"video/{output_ext}" if download_type == "Video + Audio" else f"audio/{output_ext}"
-                            )
-                        else:
-                            st.error("⚠️ File not found after download.")
-                            
-                except Exception as e:
-                    st.error(f"❌ Download error: {str(e)}")
-                    st.info("💡 Try selecting a different quality or format.")
+                    with open(filepath, "rb") as f:
+                        st.download_button(
+                            label="📂 Click to Download MP4",
+                            data=f,
+                            file_name=os.path.basename(filepath),
+                            mime="video/mp4"
+                        )
                     
+                    # Clean up the file from the server's temporary storage
+                    os.remove(filepath)
+                else:
+                    st.warning("⚠️ File not found after download. It might be a DRM-protected video.")
+
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"❌ Error: {e}")
         if "HTTP Error 403" in str(e):
-            st.warning("⚠️ YouTube is blocking the request. This might be due to:")
-            st.write("• Regional restrictions")
-            st.write("• Age-restricted content")
-            st.write("• Private videos")
-            st.write("• YouTube's anti-bot measures")
-            st.info("💡 Try again in a few moments or with a different video.")
-        else:
-            st.info("💡 Please check if the URL is valid and try again.")
-
-# Add information section
-with st.expander("ℹ️ How to use"):
-    st.write("""
-    1. Copy a YouTube video URL
-    2. Paste it in the input field above
-    3. Select your preferred video quality
-    4. Choose between Video+Audio or Audio only
-    5. Click Download and wait for processing
-    6. Click the download button to save the file
-    """)
-
-# Footer
-st.markdown("---")
-st.markdown("⚠️ Please respect copyright laws and YouTube's Terms of Service.")
+            st.error("This 403 error might be due to YouTube's restrictions. The video could be private, age-restricted, or region-locked.")
